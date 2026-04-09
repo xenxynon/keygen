@@ -1,111 +1,139 @@
 #!/bin/bash
 
+BOLD="\e[1m"
+DIM="\e[2m"
+RESET="\e[0m"
 RED="\e[31m"
 GREEN="\e[32m"
 YELLOW="\e[33m"
-BLUE="\e[34m"
 CYAN="\e[36m"
-MAGENTA="\e[35m"
-BOLD="\e[1m"
-RESET="\e[0m"
 
 DEFAULT_CERTS_DIR="$HOME/.android-certs"
+SAMPLE_SUBJECT="/C=US/ST=California/L=Mountain View/O=Android/OU=Android/CN=Android/emailAddress=android@android.com"
+KEYS=(bluetooth certs cyngn-app media networkstack otakey nfc platform releasekey sdk_sandbox shared testcert testkey verity)
 
-get_yes_no() {
-    local prompt="$1"
-    local choice
-    while true; do
-        echo -en "$prompt"
-        read -r choice </dev/tty
-        case "$choice" in
-            [Yy]* ) return 0 ;;  # Yes
-            [Nn]* ) return 1 ;;  # No
-            * ) echo -e "${RED}❌ Invalid choice. Please enter 'y' or 'n'.${RESET}" ;;
-        esac
-    done
+die() { echo -e "${RED}error: $*${RESET}" >&2; exit 1; }
+
+ask() {
+    # ask <prompt> <default: y|n> → returns 0 for yes, 1 for no
+    local prompt="$1" default="${2:-n}" choice
+    echo -en "$prompt"
+    read -r choice </dev/tty
+    [[ -z "$choice" ]] && choice="$default"
+    [[ "$choice" =~ ^[Yy] ]]
 }
 
+read_field() {
+    echo -en "${DIM}$1:${RESET} "
+    read -r val </dev/tty
+    echo "$val"
+}
+
+# ── Header ────────────────────────────────────────────────────────────────────
 clear
-echo -e "${MAGENTA}══════════════════════════════════════════${RESET}"
-echo -e "        ${BOLD}${CYAN}✦ AOSP Signing Key Generator ✦${RESET}"
-echo -e "${MAGENTA}══════════════════════════════════════════${RESET}"
-echo -e "${BOLD}${YELLOW}🔹 Android signing keys ensure system integrity & prevent unauthorized changes.${RESET}"
-echo -e "${BOLD}${YELLOW}🔹 Each key signs different system components (platform, media, etc.).${RESET}"
-echo -e "${RED}⚠ DO NOT share these keys—leaking them allows attackers to sign system apps!${RESET}"
+echo -e "${BOLD}AOSP Signing Key Generator${RESET}"
+echo -e "${DIM}Signs system components: platform, media, OTA, etc.${RESET}"
+echo -e "${RED}Keep keys private — loss means inability to ship updates.${RESET}"
 echo
 
-echo -en "${BOLD}${BLUE}❯ Enter key output directory [Default: ${DEFAULT_CERTS_DIR}]: ${RESET}"
-read -r certs_dir
-[ -z "$certs_dir" ] && certs_dir="$DEFAULT_CERTS_DIR"
+# ── Output directory ──────────────────────────────────────────────────────────
+echo -en "${BOLD}Output dir${RESET} [${CYAN}${DEFAULT_CERTS_DIR}${RESET}]: "
+read -r certs_dir </dev/tty
+[[ -z "$certs_dir" ]] && certs_dir="$DEFAULT_CERTS_DIR"
 
+if [[ -d "$certs_dir" ]]; then
+    existing_keys=()
+    for k in "${KEYS[@]}"; do
+        [[ -f "$certs_dir/$k.pk8" || -f "$certs_dir/$k.x509.pem" ]] && existing_keys+=("$k")
+    done
 
-if [ -d "$certs_dir" ]; then
-    echo
-    echo -e "${YELLOW}⚠ The directory ${BOLD}$certs_dir${RESET}${YELLOW} already exists.${RESET}"
+    if [[ ${#existing_keys[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Existing keys:${RESET} ${existing_keys[*]}"
+        echo "  [a] remove all and regenerate"
+        echo "  [s] select keys to remove"
+        echo "  [q] quit"
+        echo -en "${BOLD}Choice:${RESET} "
+        read -r dir_choice </dev/tty
 
-    if get_yes_no "${BOLD}${RED}❯ Remove and generate fresh keys? (y/N): ${RESET}"; then
-        rm -rf "$certs_dir"
-        echo -e "${GREEN}✔ Old keys removed.${RESET}"
-    else
-        echo -e "${CYAN}✔ Keeping existing keys. Exiting.${RESET}"
-        exit 0
+        case "$dir_choice" in
+            a)
+                rm -rf "$certs_dir" || die "failed to remove $certs_dir"
+                echo -e "${GREEN}removed.${RESET}"
+                ;;
+            s)
+                echo -e "${DIM}Enter key names to remove (space-separated):${RESET}"
+                echo -e "${DIM}Available: ${existing_keys[*]}${RESET}"
+                echo -en "> "
+                read -r -a keys_to_remove </dev/tty
+                for k in "${keys_to_remove[@]}"; do
+                    rm -f "$certs_dir/$k.pk8" "$certs_dir/$k.x509.pem"
+                    echo -e "  removed $k"
+                done
+                ;;
+            q|*)
+                echo "exiting."
+                exit 0
+                ;;
+        esac
     fi
 fi
 
-mkdir -p "$certs_dir"
+mkdir -p "$certs_dir" || die "failed to create $certs_dir"
 
-SAMPLE_SUBJECT="/C=US/ST=California/L=Mountain View/O=Android/OU=Android/CN=Android/emailAddress=android@android.com"
+# ── Subject ───────────────────────────────────────────────────────────────────
 echo
-echo -en "${BOLD}${BLUE}❯ Use this sample subject? ${RESET}(${YELLOW}$SAMPLE_SUBJECT${RESET}) (Y/n): "
-read -r use_sample </dev/tty
-
-if [[ "$use_sample" =~ ^[Yy]?$ ]]; then
+echo -e "${DIM}Sample subject: $SAMPLE_SUBJECT${RESET}"
+if ask "${BOLD}Use sample subject?${RESET} [Y/n]: " y; then
     subject="$SAMPLE_SUBJECT"
-    echo -e "${GREEN}✔ Using sample subject.${RESET}"
 else
-    echo -e "${BOLD}${MAGENTA}Now enter subject details for your keys:${RESET}"
     subject=""
-    for entry in C ST L O OU CN emailAddress; do
-        echo -en "${BOLD}${BLUE}$entry: ${RESET}"
-        read -r val
-        subject+="/$entry=$val"
+    for field in C ST L O OU CN emailAddress; do
+        val=$(read_field "$field")
+        subject+="/$field=$val"
     done
 fi
+[[ -z "$subject" ]] && die "subject cannot be empty."
 
+[[ ! -x "./development/tools/make_key" ]] && die "make_key not found — run from AOSP root."
+
+# ── Generate ──────────────────────────────────────────────────────────────────
 echo
+echo -e "${BOLD}Generating ${#KEYS[@]} keys${RESET} → ${CYAN}$certs_dir${RESET}"
+echo -e "${DIM}────────────────────────────────────────${RESET}"
 
-echo -e "\n📌 ${BOLD}${CYAN}Generating keys in:${RESET} ${BOLD}$certs_dir${RESET}"
-echo -e "${MAGENTA}──────────────────────────────────────────────${RESET}"
-
-keys=("bluetooth" "certs" "cyngn-app" "media" "networkstack" "otakey" "nfc" "platform" "releasekey" "sdk_sandbox" "shared" "testcert" "testkey" "verity")
-
-for key in "${keys[@]}"; do
-    echo -en "   ${BOLD}${BLUE}Generating:${RESET} ${BOLD}${YELLOW}$key${RESET}..."
-    echo ""
+failed=()
+for key in "${KEYS[@]}"; do
+    # skip if both files already exist (were not removed)
+    if [[ -f "$certs_dir/$key.pk8" && -f "$certs_dir/$key.x509.pem" ]]; then
+        printf "  %-14s ${DIM}skipped (exists)${RESET}\n" "$key"
+        continue
+    fi
+    echo -e "  ${DIM}[ $key ]${RESET}"
     ./development/tools/make_key "$certs_dir/$key" "$subject"
+    if [[ -f "$certs_dir/$key.pk8" && -f "$certs_dir/$key.x509.pem" ]]; then
+        printf "  %-14s ${GREEN}ok${RESET}\n" "$key"
+    else
+        printf "  %-14s ${RED}failed${RESET}\n" "$key"
+        failed+=("$key")
+    fi
 done
 
-echo -e "${MAGENTA}──────────────────────────────────────────────${RESET}"
-echo -e "${GREEN}✔ All keys generated successfully!${RESET}"
-echo -e "${RED}⚠ Keep this folder safe. Losing these keys means you cannot update signed builds!${RESET}"
-echo
+echo -e "${DIM}────────────────────────────────────────${RESET}"
+[[ ${#failed[@]} -gt 0 ]] && die "failed keys: ${failed[*]}"
+echo -e "${GREEN}all keys generated.${RESET}"
 
+# ── Makefile ──────────────────────────────────────────────────────────────────
 MAKEFILE_PATH="$certs_dir/keys.mk"
-
-echo -e "${BOLD}${BLUE}Generating Makefile: ${RESET}${BOLD}$MAKEFILE_PATH${RESET}"
-cat <<EOF > "$MAKEFILE_PATH"
-# Include this in your device tree or vendor makefile
+cat > "$MAKEFILE_PATH" <<EOF
+# Generated by aosp-keygen
 SIGNING_KEY_PATH ?= $certs_dir
-RELEASE_KEY := \$(SIGNING_KEY_PATH)/releasekey
+RELEASE_KEY      := \$(SIGNING_KEY_PATH)/releasekey
+
 PRODUCT_DEFAULT_DEV_CERTIFICATE := \$(RELEASE_KEY)
-PRODUCT_OTA_PUBLIC_KEYS := \$(RELEASE_KEY)
+PRODUCT_OTA_PUBLIC_KEYS          := \$(RELEASE_KEY)
 EOF
 
-echo -e "${GREEN}✔ Makefile generated.${RESET}"
 echo
-echo -e "${BOLD}${BLUE} Now include the Makefile in your device tree/vendor:${RESET}"
-echo -e "    ${BOLD}include \$(SIGNING_KEY_PATH)/keys.mk${RESET}"
-echo
-echo -e "${MAGENTA}══════════════════════════════════════════${RESET}"
-echo -e "${BOLD}✔ Setup Complete.${RESET} You can now build your ROM using the new keys :)"
-echo -e "${MAGENTA}══════════════════════════════════════════${RESET}"
+echo -e "${BOLD}keys.mk${RESET} → ${CYAN}$MAKEFILE_PATH${RESET}"
+echo -e "${DIM}Include via: include \$(SIGNING_KEY_PATH)/keys.mk${RESET}"
+echo -e "${GREEN}done.${RESET}"
